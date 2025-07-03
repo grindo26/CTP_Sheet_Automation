@@ -61,6 +61,7 @@ var COL_FIRST_NAME = 2; // B
 var COL_MIDDLE_NAME = 3; // C
 var COL_LAST_NAME = 4; // D
 var COL_NICK_NAME = 6; // F
+var COL_EMAIL = 5;
 var COL_EAD_URL1 = 10; // J
 var COL_EAD_URL2 = 11; // K
 var COL_FOLDER_NAME = 12; // L
@@ -213,43 +214,53 @@ function processRowEAD(sheet, row) {
         var firstName = data[COL_FIRST_NAME - 1];
         var middleName = data[COL_MIDDLE_NAME - 1];
         var lastName = data[COL_LAST_NAME - 1];
+        var email = data[COL_EMAIL - 1];
         var nickName = data[COL_NICK_NAME - 1];
         var folderName = data[COL_FOLDER_NAME - 1];
         var eadUrl1 = getPlainUrl(sheet, row, COL_EAD_URL1);
         var eadUrl2 = getPlainUrl(sheet, row, COL_EAD_URL2);
 
-        if (!folderName || !eadUrl1) {
-            Logger.log("Row %s missing folder name or EAD URL, skipping.", row);
+        if (!firstName || !lastName || !email || !eadUrl1) {
+            Logger.log("Row %s missing key data, skipping.", row);
             return;
         }
 
-        // build full name and filenames
-        var fullName = firstName + (nickName ? " (" + nickName + ")" : "") + (middleName ? " " + middleName : "") + " " + lastName;
-        var ext1 = getFileExtension(eadUrl1);
-        var ext2 = eadUrl2 ? getFileExtension(eadUrl2) : "";
-        var fileName1 = fullName + " - EAD Card 1" + ext1;
-        var fileName2 = fullName + " - EAD Card 2" + ext2;
-
-        // create or get folder
-        var parentFolderId = "315593622123";
-        var folder = createOrGetBoxFolder(parentFolderId, folderName);
-        if (!folder || !folder.id) {
-            Logger.log("Failed to get/create folder for row %s", row);
+        // 1) Under your top‐level “root” folder, find / create the A-Z bucket
+        var ROOT_PARENT_ID = "315593622123";
+        var firstLetter = firstName.charAt(0).toUpperCase();
+        var letterFolder = createOrGetBoxFolder(ROOT_PARENT_ID, firstLetter);
+        if (!letterFolder || !letterFolder.id) {
+            Logger.log("Couldn’t get or create letter bucket for %s", firstLetter);
             return;
         }
 
-        // write folder link to sheet
-        var folderLink = "https://app.box.com/folder/" + folder.id;
+        // 2) Inside that, find / create the person’s folder
+        var personFolderName = firstName + " " + lastName + " " + email;
+        var personFolder = createOrGetBoxFolder(letterFolder.id, personFolderName);
+        if (!personFolder || !personFolder.id) {
+            Logger.log("Couldn’t get/create person folder %s", personFolderName);
+            return;
+        }
+
+        // 3) Write the folder link back to the sheet
+        var folderLink = "https://app.box.com/folder/" + personFolder.id;
         sheet.getRange(row, COL_FOLDER_LINK).setValue(folderLink);
 
-        // if empty, upload
-        if (!folderHasFiles(folder.id)) {
-            downloadAndUploadFileToBox(eadUrl1, folder.id, fileName1);
+        // 4) If it’s empty, upload the EAD files into that person‐folder
+        if (!folderHasFiles(personFolder.id)) {
+            // build filenames
+            var fullName = firstName + (nickName ? " (" + nickName + ")" : "") + (middleName ? " " + middleName : "") + " " + lastName;
+            var ext1 = getFileExtension(eadUrl1);
+            var fileName1 = fullName + " - EAD Card 1" + ext1;
+            downloadAndUploadFileToBox(eadUrl1, personFolder.id, fileName1);
+
             if (eadUrl2) {
-                downloadAndUploadFileToBox(eadUrl2, folder.id, fileName2);
+                var ext2 = getFileExtension(eadUrl2);
+                var fileName2 = fullName + " - EAD Card 2" + ext2;
+                downloadAndUploadFileToBox(eadUrl2, personFolder.id, fileName2);
             }
         } else {
-            Logger.log("Folder %s already has files, skipping uploads.", folder.name);
+            Logger.log("Person folder %s already has files – skipping upload.", personFolderName);
         }
     } catch (e) {
         Logger.log("Error processing row %s: %s", row, e);
