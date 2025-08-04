@@ -1,3 +1,21 @@
+/*
+function onEdit(e) {
+  if (!e) return; // Exit if there's no event object
+
+  var range = e.range;
+
+  // Check if the edited range is within T4:CI (20 to 87 in terms of column numbers)
+  if (range.getColumn() >= 20 && range.getColumn() <= 87 && range.getRow() >= 4) {
+    // Display a warning message
+    var ui = SpreadsheetApp.getUi();
+    ui.alert('Warning: You cannot edit this range. Changes have been removed.');
+
+    // Clear the accidental edit
+    range.clearContent();
+  }
+}
+*/
+
 // ===============================
 // OAuth2 & Box API Setup
 // ===============================
@@ -48,6 +66,7 @@ function getBoxAccessToken() {
     } else {
         var authorizationUrl = service.getAuthorizationUrl();
         Logger.log("Authorization is required. Open the following URL and re-run the script: %s", authorizationUrl);
+        Logger.log(getOAuthService().getRedirectUri())
         throw new Error("Authorization required.");
     }
 }
@@ -57,16 +76,16 @@ function getBoxAccessToken() {
 // ===============================
 
 // === Sheet columns (1-indexed) ===
-var COL_FIRST_NAME = 2; // B
-var COL_MIDDLE_NAME = 3; // C
-var COL_LAST_NAME = 4; // D
-var COL_NICK_NAME = 6; // F
-var COL_EMAIL = 5;
-var COL_EAD_URL1 = 10; // J
-var COL_EAD_URL2 = 11; // K
-var COL_FOLDER_NAME = 12; // L
-var COL_SUBMISSION_DT = 13; // M
-var COL_FOLDER_LINK = 14; // N — where we'll write the Box folder URL
+var COL_FIRST_NAME = 39; // AM
+var COL_MIDDLE_NAME = 40; // AN
+var COL_LAST_NAME = 41; // AO
+var COL_EMAIL = 44; // AR
+var COL_RESUME = 156 // EZ
+// var COL_EAD_URL1 = 10; // J
+// var COL_EAD_URL2 = 11; // K
+// var COL_FOLDER_NAME = 12; // L
+// var COL_SUBMISSION_DT = 13; // M
+var COL_FOLDER_LINK = 168; // FL — where we'll write the Box folder URL
 
 // === Batch processing settings ===
 var BATCH_SIZE = 20; // rows per execution
@@ -109,50 +128,62 @@ function folderHasFiles(folderId) {
  * Creates or retrieves an existing Box folder under the specified parent folder.
  */
 function createOrGetBoxFolder(parentFolderId, folderName) {
-    var accessToken = getBoxAccessToken();
-    var folderUrl = "https://api.box.com/2.0/folders/" + parentFolderId + "/items";
-    var options = {
-        method: "GET",
+  var accessToken = getBoxAccessToken();
+  var offset = 0;
+  var limit = 100;
+  var totalCount = Infinity;
+
+  try {
+    do{
+      var folderUrl = `https://api.box.com/2.0/folders/${parentFolderId}/items?limit=${limit}&offset=${offset}`;
+      var options = {
+          method: "GET",
+          headers: {
+              Authorization: "Bearer " + accessToken,
+              "Content-Type": "application/json",
+          },
+          muteHttpExceptions: true,
+      };
+
+      var response = UrlFetchApp.fetch(folderUrl, options);
+      var data = JSON.parse(response.getContentText());
+      var items = Array.isArray(data.entries) ? data.entries : [];
+
+      // Update totalCount once we have it
+      if (data.total_count) {
+          totalCount = data.total_count;
+      }
+
+      for (var i = 0; i < items.length; i++) {
+          if (items[i].type === "folder" && items[i].name === folderName) {
+              return items[i]; // ✅ Folder found
+          }
+      }
+
+      offset += limit;
+    } while (offset < totalCount);
+
+    // Folder not found — create it
+    var payload = {
+        name: folderName,
+        parent: { id: parentFolderId },
+    };
+    var createOptions = {
+        method: "POST",
         headers: {
             Authorization: "Bearer " + accessToken,
             "Content-Type": "application/json",
         },
+        payload: JSON.stringify(payload),
         muteHttpExceptions: true,
     };
-
-    try {
-        var response = UrlFetchApp.fetch(folderUrl, options);
-        var resp = JSON.parse(response.getContentText());
-        var items = Array.isArray(resp.entries) ? resp.entries : [];
-
-        // If folder exists, return it
-        for (var i = 0; i < items.length; i++) {
-            if (items[i].type === "folder" && items[i].name === folderName) {
-                return items[i];
-            }
-        }
-
-        // Otherwise create
-        var payload = {
-            name: folderName,
-            parent: { id: parentFolderId },
-        };
-        var createOptions = {
-            method: "POST",
-            headers: {
-                Authorization: "Bearer " + accessToken,
-                "Content-Type": "application/json",
-            },
-            payload: JSON.stringify(payload),
-            muteHttpExceptions: true,
-        };
-        var createResp = UrlFetchApp.fetch("https://api.box.com/2.0/folders", createOptions);
-        var folder = JSON.parse(createResp.getContentText());
-        return folder.id ? folder : null;
-    } catch (e) {
-        Logger.log("Error in createOrGetBoxFolder: " + e);
-        return null;
-    }
+    var createResp = UrlFetchApp.fetch("https://api.box.com/2.0/folders", createOptions);
+    var folder = JSON.parse(createResp.getContentText());
+    return folder.id ? folder : null;
+  } catch (e) {
+    Logger.log("Error in createOrGetBoxFolder: " + e);
+    return null;
+  }
 }
 
 /**
@@ -198,7 +229,7 @@ function downloadAndUploadFileToBox(fileUrl, folderId, fileName) {
  */
 function onChangeEAD(e) {
     var sheet = e.source.getActiveSheet();
-    if (sheet.getName() !== "EAD card") return;
+    if (sheet.getName() !== "jotform clean") return;
     if (e.changeType !== "EDIT" && e.changeType !== "INSERT_ROW") return;
     var r = sheet.getActiveRange().getRow();
     if (r === 1) return; // skip header
@@ -212,21 +243,22 @@ function processRowEAD(sheet, row) {
     try {
         var data = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
         var firstName = data[COL_FIRST_NAME - 1];
-        var middleName = data[COL_MIDDLE_NAME - 1];
+        // var middleName = data[COL_MIDDLE_NAME - 1];
         var lastName = data[COL_LAST_NAME - 1];
         var email = data[COL_EMAIL - 1];
-        var nickName = data[COL_NICK_NAME - 1];
-        var folderName = data[COL_FOLDER_NAME - 1];
-        var eadUrl1 = getPlainUrl(sheet, row, COL_EAD_URL1);
-        var eadUrl2 = getPlainUrl(sheet, row, COL_EAD_URL2);
+        // var nickName = data[COL_NICK_NAME - 1];
+        // var folderName = data[COL_FOLDER_NAME - 1];
+        // var eadUrl1 = getPlainUrl(sheet, row, COL_EAD_URL1);
+        // var eadUrl2 = getPlainUrl(sheet, row, COL_EAD_URL2);
+        var resumeURL = getPlainUrl(sheet, row, COL_RESUME);
 
-        if (!firstName || !lastName || !email || !eadUrl1) {
+        if (!firstName || !lastName || !email || !resumeURL) {
             Logger.log("Row %s missing key data, skipping.", row);
             return;
         }
 
         // 1) Under your top‐level “root” folder, find / create the A-Z bucket
-        var ROOT_PARENT_ID = "315593622123";
+        var ROOT_PARENT_ID = "145627060946";
         var firstLetter = firstName.charAt(0).toUpperCase();
         var letterFolder = createOrGetBoxFolder(ROOT_PARENT_ID, firstLetter);
         if (!letterFolder || !letterFolder.id) {
@@ -250,9 +282,9 @@ function processRowEAD(sheet, row) {
         if (!folderHasFiles(personFolder.id)) {
             // build filenames
             var fullName = firstName + (nickName ? " (" + nickName + ")" : "") + (middleName ? " " + middleName : "") + " " + lastName;
-            var ext1 = getFileExtension(eadUrl1);
-            var fileName1 = fullName + " - EAD Card 1" + ext1;
-            downloadAndUploadFileToBox(eadUrl1, personFolder.id, fileName1);
+            var ext1 = getFileExtension(resumeURL);
+            var fileName1 = fullName + " - Resume" + ext1;
+            downloadAndUploadFileToBox(resumeURL, personFolder.id, fileName1);
 
             if (eadUrl2) {
                 var ext2 = getFileExtension(eadUrl2);
@@ -298,8 +330,8 @@ function getFileExtension(url) {
  */
 function processAllRowsBatch() {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName("EAD card");
-    if (!sheet) throw new Error("Sheet 'EAD card' not found!");
+    var sheet = ss.getSheetByName("jotform clean");
+    if (!sheet) throw new Error("Sheet 'jotform clean' not found!");
 
     var props = PropertiesService.getScriptProperties();
     var startRow = parseInt(props.getProperty(PROPERTY_LAST_ROW), 10) || 2;
@@ -354,8 +386,8 @@ function startBatchProcessing() {
  */
 function testProcessRowEAD() {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var sheet = ss.getSheetByName("EAD card");
-    processRowEAD(sheet, 2);
+    var sheet = ss.getSheetByName("jotform clean");
+    processRowEAD(sheet, 1715);
 }
 
 /**
@@ -441,4 +473,9 @@ function exportFoldersToSheet() {
         var link = "https://app.box.com/folder/" + folder.id;
         sheet.appendRow([folder.name, link]);
     });
+}
+
+function testAuthorization() {
+  var token = getBoxAccessToken();
+  Logger.log("Access token: " + token);
 }
